@@ -244,9 +244,9 @@ abstract class BaseVolumeViewport extends Viewport implements IVolumeViewport {
     mapper.setSampleDistance(1.0);
 
     const cfun = vtkColorTransferFunction.newInstance();
-    let colormapObj = colormapUtils.getColormap(colormap);
+    let colormapObj = colormapUtils.getColormap(colormap.name);
 
-    const { name, opacityMapping } = colormap;
+    const { name } = colormap;
 
     if (!colormapObj) {
       colormapObj = vtkColorMaps.getPresetByName(name);
@@ -264,20 +264,54 @@ abstract class BaseVolumeViewport extends Viewport implements IVolumeViewport {
     cfun.applyColorMap(colormapObj);
     cfun.setMappingRange(range[0], range[1]);
     volumeActor.getProperty().setRGBTransferFunction(0, cfun);
+  }
 
-    const ofun = vtkPiecewiseFunction.newInstance();
-    ofun.addPoint(range[0], 0.0);
-    ofun.addPoint(range[1], 1.0);
-    volumeActor.getProperty().setScalarOpacity(0, ofun);
-
-    if (!opacityMapping) {
+  /**
+   * Sets the opacity for the volume with the given ID.
+   *
+   * @param colormap - An object containing opacity that can be a number or an array of OpacityMapping
+   * @param volumeId - The ID of the volume to set the opacity for.
+   *
+   * @returns void
+   */
+  private setOpacity(colormap: ColormapPublic, volumeId: string) {
+    const applicableVolumeActorInfo = this._getApplicableVolumeActor(volumeId);
+    if (!applicableVolumeActorInfo) {
       return;
     }
+    const { volumeActor } = applicableVolumeActorInfo;
+    const vtkImageData = volumeActor.getMapper().getInputData();
+    const interval = vtkImageData.getSpacing()[2];
+    /*
+     Opacity of a volume is nonlinear. Specifically in volume rendering opacity is interpreted in terms of opacity per unit distance.
+     When you need to take an interval of a volume (say 3mm of a ray) and convert that to opacity you use a power function to accumulate the opacity over the interval.
+     For example if your opacity is 0.5/mm and the interval is 3mm long then the opacity is 1.0 - pow(1.0 - 0.5, 3) or 0.875
+     https://github.com/Kitware/vtk-js/pull/2093
+     */
+    const convertOpacityToVTKOPacity = (opacity: number, interval: number) => {
+      return 1.0 - Math.pow(1.0 - opacity, interval);
+    };
+    const ofun = vtkPiecewiseFunction.newInstance();
+    if (typeof colormap.opacity === 'number') {
+      const range = volumeActor
+        .getProperty()
+        .getRGBTransferFunction(0)
+        .getRange();
 
-    // add custom opacity points
-    opacityMapping.forEach(({ opacity, value }) => {
-      ofun.addPoint(value, opacity);
-    });
+      ofun.addPoint(
+        range[0],
+        convertOpacityToVTKOPacity(colormap.opacity, interval)
+      );
+      ofun.addPoint(
+        range[1],
+        convertOpacityToVTKOPacity(colormap.opacity, interval)
+      );
+    } else {
+      colormap.opacity.forEach(({ opacity, value }) => {
+        ofun.addPoint(value, convertOpacityToVTKOPacity(opacity, interval));
+      });
+    }
+    volumeActor.getProperty().setScalarOpacity(0, ofun);
   }
 
   /**
@@ -435,8 +469,12 @@ abstract class BaseVolumeViewport extends Viewport implements IVolumeViewport {
   ): void {
     // Note: colormap should always be done first, since we can then
     // modify the voiRange
-    if (colormap !== undefined) {
+
+    if (colormap?.name) {
       this.setColormap(colormap, volumeId, suppressEvents);
+    }
+    if (colormap?.opacity != null) {
+      this.setOpacity(colormap, volumeId);
     }
 
     if (voiRange !== undefined) {
@@ -500,8 +538,7 @@ abstract class BaseVolumeViewport extends Viewport implements IVolumeViewport {
         const [lower, upper] =
           this.VOILUTFunction === 'SIGMOID'
             ? getVoiFromSigmoidRGBTransferFunction(cfun)
-            : // @ts-ignore
-              cfun.getRange();
+            : cfun.getRange();
         return { volumeId, voiRange: { lower, upper } };
       })
       .filter(Boolean);
@@ -599,7 +636,6 @@ abstract class BaseVolumeViewport extends Viewport implements IVolumeViewport {
         `imageVolume with id: ${firstImageVolume.volumeId} does not exist`
       );
     }
-
     const volumeActors = [];
 
     await this._isValidVolumeInputArray(
@@ -800,6 +836,7 @@ abstract class BaseVolumeViewport extends Viewport implements IVolumeViewport {
     const volume = cache.getVolume(volumeId);
 
     const vtkImageData = actor.getMapper().getInputData();
+
     return {
       dimensions: vtkImageData.getDimensions(),
       spacing: vtkImageData.getSpacing(),
